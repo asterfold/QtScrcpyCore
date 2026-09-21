@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMetaEnum>
+#include <cmath>
 
 #include "keymap.h"
 
@@ -286,6 +287,10 @@ void KeyMap::loadKeyMap(const QString &json)
                 keyMapNode.data.steerWheel.useFloatingOrigin = node.contains("floatingOriginRange");
                 keyMapNode.data.steerWheel.floatingOriginRange = node.contains("floatingOriginRange")
                     ? getItemPos(node, "floatingOriginRange") : QPointF(0.0, 0.0);
+                keyMapNode.data.steerWheel.sprintKey = node.contains("sprintKey")
+                    ? getItemKey(node, "sprintKey").second : Qt::Key_unknown;
+                keyMapNode.data.steerWheel.sprintUpOffset = node.contains("sprintUpOffset")
+                    ? getItemDouble(node, "sprintUpOffset") : 0.0;
                 m_idxSteerWheel = m_keyMapNodes.size();
                 m_keyMapNodes.push_back(keyMapNode);
             } break;
@@ -415,6 +420,9 @@ void KeyMap::makeReverseMap()
             m.insert(node.data.clickMulti.keyNode.key, &node);
         } break;
         case KMT_STEER_WHEEL: {
+            if (node.data.steerWheel.sprintKey != Qt::Key_unknown) {
+                m_rmapKey.insert(node.data.steerWheel.sprintKey, &node);
+            }
             QMultiHash<int, KeyMapNode *> &ml = node.data.steerWheel.left.type == AT_KEY ? m_rmapKey : m_rmapMouse;
             ml.insert(node.data.steerWheel.left.key, &node);
             QMultiHash<int, KeyMapNode *> &mr = node.data.steerWheel.right.type == AT_KEY ? m_rmapKey : m_rmapMouse;
@@ -580,6 +588,22 @@ bool KeyMap::checkForAndroidKey(const QJsonObject &node)
 
 bool KeyMap::checkForSteerWhell(const QJsonObject &node)
 {
+    if (node.contains("sprintKey") || node.contains("sprintUpOffset")) {
+        if (!node.contains("floatingOriginRange") || !checkItemString(node, "sprintKey")
+            || !checkItemDouble(node, "sprintUpOffset") || !checkItemDouble(node, "upOffset")) {
+            return false;
+        }
+        const auto sprint = getItemKey(node, "sprintKey");
+        const double distance = getItemDouble(node, "sprintUpOffset");
+        if (sprint.first != AT_KEY || sprint.second == Qt::Key_unknown
+            || sprint.second == m_switchKey.key || !std::isfinite(distance)
+            || distance < getItemDouble(node, "upOffset")) {
+            return false;
+        }
+        for (const auto &direction : {"leftKey", "rightKey", "upKey", "downKey"}) {
+            if (getItemKey(node, direction) == sprint) return false;
+        }
+    }
     if (node.contains("floatingOriginRange")) {
         if (!checkItemPos(node, "floatingOriginRange") || !checkItemPos(node, "centerPos")) {
             return false;
@@ -588,7 +612,8 @@ bool KeyMap::checkForSteerWhell(const QJsonObject &node)
         const QPointF center = getItemPos(node, "centerPos");
         const double left = getItemDouble(node, "leftOffset");
         const double right = getItemDouble(node, "rightOffset");
-        const double up = getItemDouble(node, "upOffset");
+        const double up = node.contains("sprintUpOffset")
+            ? getItemDouble(node, "sprintUpOffset") : getItemDouble(node, "upOffset");
         const double down = getItemDouble(node, "downOffset");
         // Validate the whole translated gesture, not only its initial point.
         if (range.x() < 0 || range.y() < 0 || left < 0 || right < 0 || up < 0 || down < 0

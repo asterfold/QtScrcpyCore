@@ -92,6 +92,8 @@ public:
                 QPointF centerPos = { 0.0, 0.0 };
                 bool useFloatingOrigin = false;
                 QPointF floatingOriginRange = { 0.0, 0.0 };
+                int sprintKey = Qt::Key_unknown;
+                double sprintUpOffset = 0.0;
                 KeyNode left, right, up, down;
             } steerWheel;
             struct

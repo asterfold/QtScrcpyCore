@@ -28,7 +28,7 @@ static QString script(const QJsonObject &wheel, bool buttons = true) {
     return QJsonDocument(QJsonObject{{"switchKey", "Key_QuoteLeft"}, {"keyMapNodes", nodes}}).toJson();
 }
 struct Touch { int action; quint64 id; QPoint pos; };
-static void testProfile(const QString &path) {
+static void testProfile(const QString &path, int expectedNodes = 20) {
     QFile file(path);
     require(file.open(QIODevice::ReadOnly), "profile unavailable");
     const QByteArray bytes = file.readAll();
@@ -39,7 +39,7 @@ static void testProfile(const QString &path) {
     require(parsed.isValidMouseMoveMap(), "profile view mapping rejected");
     require(parsed.getMouseMoveMap().data.mouseMove.smallEyes.key == Qt::Key_Alt, "Alt mapping lost");
     const auto nodes = doc.object().value("keyMapNodes").toArray();
-    require(nodes.size() == 20, "expected all 20 source nodes");
+    require(expectedNodes >= 20 && nodes.size() == expectedNodes, "unexpected profile node count");
     QVector<Touch> events;
     // Validate the complete profile above, but exclude view cursor management
     // from this headless test of wheel and click messages.
@@ -85,6 +85,83 @@ static void testProfile(const QString &path) {
         require(events.size() == 5 && events.last().action == 1, "profile wheel up missing");
         for (const auto &event : events) require(event.id == events[0].id, "profile pointer changed");
     }
+    if (w.sprintKey != Qt::Key_unknown) {
+        require(parsed.getKeyMapNodeKey(w.sprintKey).type == KeyMap::KMT_STEER_WHEEL,
+                "sprint key not routed to wheel");
+        for (int i = 0; i < 16; ++i) {
+            events.clear();
+            key(w.sprintKey, true);
+            require(events.isEmpty(), "sprint alone started touch");
+            key(Qt::Key_W, true);
+            require(events.size() == 2, "sprint-first down/move missing");
+            const QPoint origin = events[0].pos;
+            const quint64 id = events[0].id;
+            near(events.last().pos - origin, position(QPointF(0, -w.sprintUpOffset)));
+            key(w.sprintKey, true, true);
+            key(Qt::Key_W, true, true);
+            require(events.size() == 2, "sprint repeat generated touch");
+            key(Qt::Key_D, true);
+            key(w.sprintKey, false);
+            near(events.last().pos - origin, position(QPointF(w.right.extendOffset, -w.up.extendOffset)));
+            key(w.sprintKey, true);
+            near(events.last().pos - origin, position(QPointF(w.right.extendOffset, -w.sprintUpOffset)));
+            key(Qt::Key_D, false);
+            key(Qt::Key_W, false);
+            require(events.size() == 7 && events.last().action == 1, "W release while sprint held did not lift");
+            for (int j = 1; j < events.size() - 1; ++j) {
+                require(events[j].action == 2 && events[j].id == id, "sprint split gesture or pointer");
+            }
+            require(events.last().id == id, "sprint up pointer changed");
+            events.clear();
+            QEventLoop hold; QTimer::singleShot(40, &hold, &QEventLoop::quit); hold.exec();
+            QCoreApplication::sendPostedEvents(&controller);
+            require(events.isEmpty(), "delayed sprint after W release");
+            // Still-held Shift applies to the next W gesture, but its release restores walk.
+            key(Qt::Key_W, true);
+            const QPoint nextOrigin = events[0].pos;
+            near(events.last().pos - nextOrigin, position(QPointF(0, -w.sprintUpOffset)));
+            key(w.sprintKey, false);
+            near(events.last().pos - nextOrigin, position(QPointF(0, -w.up.extendOffset)));
+            key(Qt::Key_W, false);
+            events.clear(); key(Qt::Key_W, true);
+            const QPoint walkOrigin = events[0].pos;
+            near(events.last().pos - walkOrigin, position(QPointF(0, -w.up.extendOffset)));
+            key(w.sprintKey, true);
+            near(events.last().pos - walkOrigin, position(QPointF(0, -w.sprintUpOffset)));
+            const int count = events.size();
+            QEventLoop quiet; QTimer::singleShot(40, &quiet, &QEventLoop::quit); quiet.exec();
+            QCoreApplication::sendPostedEvents(&controller);
+            require(events.size() == count, "held sprint drifted");
+            key(Qt::Key_W, false); key(w.sprintKey, false);
+            require(events.size() == count + 1 && events.last().action == 1, "sprint key release added touch");
+        }
+        key(w.sprintKey, true); key(Qt::Key_W, true);
+        key(parsed.getSwitchKey(), true);
+        require(events.last().action == 1, "toggle did not release sprint");
+        key(parsed.getSwitchKey(), true); events.clear(); key(Qt::Key_W, true);
+        near(events.last().pos - events[0].pos, position(QPointF(0, -w.up.extendOffset)));
+        key(Qt::Key_W, false);
+        key(w.sprintKey, true); key(Qt::Key_W, true);
+        controller.updateScript(QJsonDocument(runtime).toJson());
+        QCoreApplication::sendPostedEvents(&controller);
+        require(events.last().action == 1, "reload did not release sprint");
+        key(parsed.getSwitchKey(), true); events.clear(); key(Qt::Key_W, true);
+        near(events.last().pos - events[0].pos, position(QPointF(0, -w.up.extendOffset)));
+        key(Qt::Key_W, false);
+        const auto sourceWheel = nodes[0].toObject();
+        for (int invalidCase = 0; invalidCase < 5; ++invalidCase) {
+            auto invalid = sourceWheel;
+            if (invalidCase == 0) invalid["sprintUpOffset"] = 1.0;
+            if (invalidCase == 1) invalid["sprintKey"] = "Key_W";
+            if (invalidCase == 2) invalid.remove("sprintUpOffset");
+            if (invalidCase == 3) invalid.remove("floatingOriginRange");
+            if (invalidCase == 4) invalid["sprintUpOffset"] = -0.1;
+            KeyMap rejected; rejected.loadKeyMap(script(invalid, false));
+            require(rejected.getKeyMapNodeKey(Qt::Key_W).type == KeyMap::KMT_INVALID,
+                    "invalid sprint configuration accepted");
+        }
+        std::cout << "PASS: sprint modifier, both press orders, same pointer/origin, restore walk, W release, held Shift, no drift, toggle/reload reset, invalid bounds\n";
+    }
     int buttons = 0;
     for (const auto value : nodes) {
         const auto node = value.toObject();
@@ -114,7 +191,7 @@ static void testProfile(const QString &path) {
                 && std::abs(events[0].pos.y() - pos.y()) <= range.y() + .5, "profile button outside range");
         }
     }
-    require(buttons == 19, "missing profile buttons");
+    require(buttons == expectedNodes - 1, "missing profile buttons");
     key(parsed.getSwitchKey(), true);
     controller.updateScript(QString::fromUtf8(bytes));
     key(parsed.getSwitchKey(), true);
@@ -152,12 +229,16 @@ static void testProfile(const QString &path) {
     key(Qt::Key_Alt, true);
     key(parsed.getSwitchKey(), true); events.clear(); wait();
     require(events.isEmpty(), "delayed view touch after mapping disabled");
-    std::cout << "PASS: real profile, 20 nodes, view/Alt parsed, 64 wheel gestures and 19 buttons x 8 clicks\n";
+    std::cout << "PASS: real profile, " << nodes.size()
+              << " nodes, view/Alt parsed, 64 wheel gestures and " << buttons << " buttons x 8 clicks\n";
 }
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
-        if (argc == 2) { testProfile(QString::fromLocal8Bit(argv[1])); return 0; }
+        if (argc == 2 || argc == 3) {
+            testProfile(QString::fromLocal8Bit(argv[1]), argc == 3 ? std::stoi(argv[2]) : 20);
+            return 0;
+        }
         QJsonObject wheel{{"type", "KMT_STEER_WHEEL"}, {"centerPos", point(.3, .5)},
             {"leftKey", "Key_A"}, {"rightKey", "Key_D"}, {"upKey", "Key_W"}, {"downKey", "Key_S"},
             {"leftOffset", .1}, {"rightOffset", .1}, {"upOffset", .1}, {"downOffset", .1},

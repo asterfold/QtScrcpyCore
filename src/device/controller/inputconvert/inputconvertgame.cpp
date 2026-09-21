@@ -156,6 +156,7 @@ bool InputConvertGame::isCurrentCustomKeymap()
 void InputConvertGame::loadKeyMap(const QString &json)
 {
     releaseFloatingSteerWheel();
+    m_ctrlSteerWheel.pressedSprint = false;
     releaseRangedClicks();
     m_keyMap.loadKeyMap(json);
 }
@@ -332,7 +333,11 @@ void InputConvertGame::processSteerWheel(const KeyMap::KeyMapNode &node, const Q
     int key = from->key();
     bool flag = from->type() == QEvent::KeyPress;
     // identify keys
-    if (key == node.data.steerWheel.up.key) {
+    if (node.data.steerWheel.useFloatingOrigin && key == node.data.steerWheel.sprintKey) {
+        m_ctrlSteerWheel.pressedSprint = flag;
+        // Shift alone does not create a touch or change sideways/backwards motion.
+        if (!m_ctrlSteerWheel.pressedUp) return;
+    } else if (key == node.data.steerWheel.up.key) {
         m_ctrlSteerWheel.pressedUp = flag;
     } else if (key == node.data.steerWheel.right.key) {
         m_ctrlSteerWheel.pressedRight = flag;
@@ -347,7 +352,8 @@ void InputConvertGame::processSteerWheel(const KeyMap::KeyMapNode &node, const Q
     int pressedNum = 0;
     if (m_ctrlSteerWheel.pressedUp) {
         ++pressedNum;
-        offset.ry() -= node.data.steerWheel.up.extendOffset;
+        offset.ry() -= m_ctrlSteerWheel.pressedSprint
+            ? node.data.steerWheel.sprintUpOffset : node.data.steerWheel.up.extendOffset;
     }
     if (m_ctrlSteerWheel.pressedRight) {
         ++pressedNum;
@@ -817,6 +823,7 @@ bool InputConvertGame::switchGameMap()
     m_gameMap = !m_gameMap;
     if (!m_gameMap) {
         releaseFloatingSteerWheel();
+        m_ctrlSteerWheel.pressedSprint = false;
         releaseRangedClicks();
     }
     qInfo() << QString("current keymap mode: %1").arg(m_gameMap ? "custom" : "normal");
