@@ -39,6 +39,9 @@ protected:
 
     // steer wheel
     void processSteerWheel(const KeyMap::KeyMapNode &node, const QKeyEvent *from);
+    void releaseFloatingSteerWheel();
+    void processRangedClick(int key, bool pressed, const QPointF &center, const QPointF &range);
+    void releaseRangedClicks();
 
     // click
     void processKeyClick(const QPointF &clickPos, bool clickTwice, bool switchMap, const QKeyEvent *from);
@@ -84,6 +87,7 @@ private:
     bool m_needBackMouseMove = false;
     int m_multiTouchID[MULTI_TOUCH_MAX_NUM] = { 0 };
     KeyMap m_keyMap;
+    QHash<int, QPointF> m_rangedClicks;
 
     bool m_processMouseMove = true;
 
@@ -92,6 +96,8 @@ private:
     {
         // the first key pressed
         int touchKey = Qt::Key_unknown;
+        bool floatingActive = false;
+        QPointF floatingOrigin;
         bool pressedUp = false;
         bool pressedDown = false;
         bool pressedLeft = false;

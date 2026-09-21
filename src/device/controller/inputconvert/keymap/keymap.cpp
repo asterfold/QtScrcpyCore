@@ -95,6 +95,24 @@ void KeyMap::loadKeyMap(const QString &json)
             keyMapNode.data.mouseMove.startPos.setY(getItemDouble(startPos, "y"));
         }
 
+        keyMapNode.data.mouseMove.startPosRange = QPointF(0, 0);
+        keyMapNode.data.mouseMove.smallEyesRange = QPointF(0, 0);
+        if (mouseMoveMap.contains("startPosRange")) {
+            if (!checkItemPos(mouseMoveMap, "startPosRange")) {
+                errorString = "json error: invalid startPosRange";
+                goto parseError;
+            }
+            const QPointF range = getItemPos(mouseMoveMap, "startPosRange");
+            const QPointF center = keyMapNode.data.mouseMove.startPos;
+            if (range.x() < 0 || range.y() < 0 || center.x() - range.x() < .05
+                || center.x() + range.x() > .95 || center.y() - range.y() < .05
+                || center.y() + range.y() > .95) {
+                errorString = "json error: startPosRange outside view drag bounds";
+                goto parseError;
+            }
+            keyMapNode.data.mouseMove.startPosRange = range;
+        }
+
         // small eyes
         if (checkItemObject(mouseMoveMap, "smallEyes")) {
             QJsonObject smallEyes = mouseMoveMap.value("smallEyes").toObject();
@@ -125,6 +143,8 @@ void KeyMap::loadKeyMap(const QString &json)
             keyMapNode.data.mouseMove.smallEyes.type = key.first;
             keyMapNode.data.mouseMove.smallEyes.key = key.second;
             keyMapNode.data.mouseMove.smallEyes.pos = getItemPos(smallEyes, "pos");
+            keyMapNode.data.mouseMove.smallEyesRange = smallEyes.contains("touchRange")
+                ? getItemPos(smallEyes, "touchRange") : QPointF(0, 0);
         }
 
         m_idxMouseMove = m_keyMapNodes.size();
@@ -166,6 +186,9 @@ void KeyMap::loadKeyMap(const QString &json)
                 keyMapNode.data.click.keyNode.key = key.second;
                 keyMapNode.data.click.keyNode.pos = getItemPos(node, "pos");
                 keyMapNode.data.click.switchMap = getItemBool(node, "switchMap");
+                keyMapNode.data.click.useTouchRange = node.contains("touchRange");
+                keyMapNode.data.click.touchRange = node.contains("touchRange")
+                    ? getItemPos(node, "touchRange") : QPointF(0.0, 0.0);
                 keyMapNode.data.click.keyNode.androidKey = static_cast<AndroidKeycode>(getItemDouble(node, "androidKey"));
                 m_keyMapNodes.push_back(keyMapNode);
             } break;
@@ -260,6 +283,9 @@ void KeyMap::loadKeyMap(const QString &json)
                 keyMapNode.data.steerWheel.down = { downKey.first, downKey.second, QPointF(0, 0), QPointF(0, 0), getItemDouble(node, "downOffset") };
 
                 keyMapNode.data.steerWheel.centerPos = getItemPos(node, "centerPos");
+                keyMapNode.data.steerWheel.useFloatingOrigin = node.contains("floatingOriginRange");
+                keyMapNode.data.steerWheel.floatingOriginRange = node.contains("floatingOriginRange")
+                    ? getItemPos(node, "floatingOriginRange") : QPointF(0.0, 0.0);
                 m_idxSteerWheel = m_keyMapNodes.size();
                 m_keyMapNodes.push_back(keyMapNode);
             } break;
@@ -489,6 +515,17 @@ bool KeyMap::checkItemPos(const QJsonObject &node, const QString &name)
 
 bool KeyMap::checkForClick(const QJsonObject &node)
 {
+    if (node.contains("touchRange")) {
+        if (!checkItemPos(node, "touchRange") || !checkItemPos(node, "pos") || getItemBool(node, "switchMap")) {
+            return false;
+        }
+        const QPointF range = getItemPos(node, "touchRange");
+        const QPointF pos = getItemPos(node, "pos");
+        if (range.x() < 0 || range.y() < 0 || pos.x() - range.x() < 0 || pos.y() - range.y() < 0
+            || pos.x() + range.x() >= 1 || pos.y() + range.y() >= 1) {
+            return false;
+        }
+    }
     return checkForClickTwice(node) && checkItemBool(node, "switchMap");
 }
 
@@ -543,6 +580,24 @@ bool KeyMap::checkForAndroidKey(const QJsonObject &node)
 
 bool KeyMap::checkForSteerWhell(const QJsonObject &node)
 {
+    if (node.contains("floatingOriginRange")) {
+        if (!checkItemPos(node, "floatingOriginRange") || !checkItemPos(node, "centerPos")) {
+            return false;
+        }
+        const QPointF range = getItemPos(node, "floatingOriginRange");
+        const QPointF center = getItemPos(node, "centerPos");
+        const double left = getItemDouble(node, "leftOffset");
+        const double right = getItemDouble(node, "rightOffset");
+        const double up = getItemDouble(node, "upOffset");
+        const double down = getItemDouble(node, "downOffset");
+        // Validate the whole translated gesture, not only its initial point.
+        if (range.x() < 0 || range.y() < 0 || left < 0 || right < 0 || up < 0 || down < 0
+            || center.x() - range.x() - left < 0 || center.x() + range.x() + right >= 1
+            || center.y() - range.y() - up < 0 || center.y() + range.y() + down >= 1) {
+            qWarning() << "floatingOriginRange: gesture must remain inside the screen";
+            return false;
+        }
+    }
     return checkItemString(node, "leftKey") && checkItemString(node, "rightKey") && checkItemString(node, "upKey") && checkItemString(node, "downKey")
            && checkItemDouble(node, "leftOffset") && checkItemDouble(node, "rightOffset") && checkItemDouble(node, "upOffset")
            && checkItemDouble(node, "downOffset") && checkItemPos(node, "centerPos");

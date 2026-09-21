@@ -76,6 +76,8 @@ public:
             {
                 KeyNode keyNode;
                 bool switchMap = false;
+                bool useTouchRange = false;
+                QPointF touchRange = { 0.0, 0.0 };
             } click;
             struct
             {
@@ -88,6 +90,8 @@ public:
             struct
             {
                 QPointF centerPos = { 0.0, 0.0 };
+                bool useFloatingOrigin = false;
+                QPointF floatingOriginRange = { 0.0, 0.0 };
                 KeyNode left, right, up, down;
             } steerWheel;
             struct
@@ -101,6 +105,8 @@ public:
                 QPointF startPos   = { 0.0, 0.0 };
                 QPointF speedRatio = { 1.0, 1.0 };
                 KeyNode smallEyes;
+                QPointF startPosRange = { 0.0, 0.0 };
+                QPointF smallEyesRange = { 0.0, 0.0 };
             } mouseMove;
             struct
             {
