@@ -17,6 +17,8 @@ class KeyMap : public QObject
 {
     Q_OBJECT
 public:
+    // Internal action ID outside Qt's physical keyboard key range.
+    enum { WheelDownKey = 0x02000001 };
     enum KeyMapType
     {
         KMT_INVALID = -1,
@@ -109,6 +111,7 @@ public:
                 KeyNode smallEyes;
                 QPointF startPosRange = { 0.0, 0.0 };
                 QPointF smallEyesRange = { 0.0, 0.0 };
+                QRectF dragBounds;
             } mouseMove;
             struct
             {

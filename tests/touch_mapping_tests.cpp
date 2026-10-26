@@ -232,9 +232,106 @@ static void testProfile(const QString &path, int expectedNodes = 20) {
     std::cout << "PASS: real profile, " << nodes.size()
               << " nodes, view/Alt parsed, 64 wheel gestures and " << buttons << " buttons x 8 clicks\n";
 }
+// Real profile: repeated tiny relative deltas must keep moving the camera,
+// and neither camera resets nor mouse clicks may lift the held W pointer.
+static void testRelativeInput(const QString &path) {
+    QFile file(path);
+    require(file.open(QIODevice::ReadOnly), "relative profile unavailable");
+    const QByteArray profile = file.readAll();
+    const auto viewConfig = QJsonDocument::fromJson(profile).object().value("mouseMoveMap").toObject();
+    const auto configuredBounds = viewConfig.value("dragBounds").toObject();
+    const bool checkBounds = !configuredBounds.isEmpty();
+    const QRectF dragBounds(QPointF(configuredBounds.value("left").toDouble(), configuredBounds.value("top").toDouble()),
+                           QPointF(configuredBounds.value("right").toDouble(), configuredBounds.value("bottom").toDouble()));
+    if (checkBounds) {
+        KeyMap parsed;
+        parsed.loadKeyMap(QString::fromUtf8(profile));
+        require(parsed.isValidMouseMoveMap() && parsed.getMouseMoveMap().data.mouseMove.dragBounds == dragBounds,
+            "configured safe area was ignored");
+        for (const auto &bad : {QJsonObject{{"left", -.1}, {"top", .2}, {"right", .7}, {"bottom", .45}},
+                               QJsonObject{{"left", .7}, {"top", .2}, {"right", .45}, {"bottom", .45}},
+                               QJsonObject{{"left", .45}, {"top", .6}, {"right", .7}, {"bottom", .8}},
+                               QJsonObject{{"left", "bad"}, {"top", .2}, {"right", .7}, {"bottom", .45}}}) {
+            auto doc = QJsonDocument::fromJson(profile).object();
+            auto view = doc.value("mouseMoveMap").toObject();
+            view["dragBounds"] = bad; doc["mouseMoveMap"] = view;
+            KeyMap rejected; rejected.loadKeyMap(QJsonDocument(doc).toJson());
+            require(!rejected.isValidMouseMoveMap(), "invalid safe area accepted");
+        }
+    }
+    QVector<Touch> events;
+    QVector<quint16> pressures;
+    Controller controller([&](const QByteArray &data) -> qint64 {
+        if (data.size() >= 24 && static_cast<unsigned char>(data[0]) == ControlMsg::CMT_INJECT_TOUCH) {
+            const auto *p = reinterpret_cast<const uchar *>(data.constData());
+            events.append({p[1], qFromBigEndian<quint64>(p + 2),
+                QPoint(qFromBigEndian<quint32>(p + 10), qFromBigEndian<quint32>(p + 14))});
+            pressures.append(qFromBigEndian<quint16>(p + 22));
+        }
+        return data.size();
+    }, QString::fromUtf8(profile));
+    const QSize size(2400,1080);
+    auto flush = [&] { QCoreApplication::sendPostedEvents(&controller); };
+    auto key = [&](int code, bool down, bool repeat = false) {
+        QKeyEvent event(down ? QEvent::KeyPress : QEvent::KeyRelease, code, Qt::NoModifier, "", repeat);
+        controller.keyEvent(&event, size, size); flush();
+    };
+    auto relative = [&](QPointF delta) {
+        const int begin = events.size();
+        QMouseEvent event(QEvent::MouseMove, delta, delta, QPointF(500,500),
+            Qt::NoButton, Qt::NoButton, Qt::NoModifier, Qt::MouseEventSynthesizedByApplication);
+        controller.mouseEvent(&event, size, size); flush();
+        if (checkBounds) {
+            for (int i=begin;i<events.size();++i) {
+                const QPointF normalized(double(events[i].pos.x())/size.width(),double(events[i].pos.y())/size.height());
+                require(dragBounds.adjusted(-.001,-.001,.001,.001).contains(normalized),
+                    "camera touch escaped safe area into mapped buttons");
+            }
+        }
+    };
+    key(Qt::Key_QuoteLeft,true);
+    key(Qt::Key_W,true);
+    require(events.size()==2, "held W down/move missing");
+    const quint64 wheel = events.first().id;
+    {
+        QEventLoop stationary;
+        QTimer::singleShot(10000,&stationary,&QEventLoop::quit);
+        stationary.exec(); flush();
+        require(events.size()==2 && pressures[0]>0 && pressures[1]>0,
+            "stationary W released or lost pressure without another key");
+    }
+    relative(QPointF(2,1));
+    const QPoint firstCamera = events.last().pos;
+    for (int i=0;i<100;++i) {
+        key(Qt::Key_W,false,true); key(Qt::Key_W,true,true);
+        relative(QPointF(2,1));
+    }
+    require(events.last().pos.x() > firstCamera.x()+10, "repeated tiny relative movement stalled");
+    for (int i=0;i<20;++i) {
+        relative(QPointF(9000,-9000)); relative(QPointF(-9000,9000));
+        for (bool down : {true,false}) {
+            QMouseEvent click(down ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                QPointF(500,500),Qt::LeftButton,down ? Qt::LeftButton : Qt::NoButton,Qt::NoModifier);
+            controller.mouseEvent(&click,size,size); flush();
+        }
+    }
+    QEventLoop hold; QTimer::singleShot(1200,&hold,&QEventLoop::quit); hold.exec(); flush();
+    for (int i=0;i<events.size();++i) {
+        require(events[i].id != wheel || events[i].action != 1, "camera/click interrupted held W");
+        require(events[i].action == 1 ? pressures[i] == 0 : pressures[i] > 0,
+            "active touch lost pressure before release");
+    }
+    key(Qt::Key_W,false);
+    require(events.last().id==wheel && events.last().action==1, "physical W release missing");
+    key(Qt::Key_QuoteLeft,true);
+    std::cout << "PASS: real profile relative micro-movement, large camera resets, held W, repeat release filtering, clicks, active pressure\n";
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
+        if (argc == 3 && QString::fromLocal8Bit(argv[1]) == "--relative") {
+            testRelativeInput(QString::fromLocal8Bit(argv[2])); return 0;
+        }
         if (argc == 2 || argc == 3) {
             testProfile(QString::fromLocal8Bit(argv[1]), argc == 3 ? std::stoi(argv[2]) : 20);
             return 0;

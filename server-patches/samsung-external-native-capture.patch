@@ -1,0 +1,156 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/Server.java
++++ b/server/src/main/java/com/genymobile/scrcpy/Server.java
+@@ -151,10 +151,14 @@
+                 } else {
+                     surfaceCapture = new CameraCapture(options);
+                 }
+-                SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
+-                asyncProcessors.add(surfaceEncoder);
+-
+-                if (controller != null) {
++                if (com.genymobile.scrcpy.video.NativeScreenRecorder.isSupported(options)) {
++                    asyncProcessors.add(new com.genymobile.scrcpy.video.NativeScreenRecorder(videoStreamer, controller, options));
++                } else {
++                    SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
++                    asyncProcessors.add(surfaceEncoder);
++                }
++
++                if (controller != null && !com.genymobile.scrcpy.video.NativeScreenRecorder.isSupported(options)) {
+                     controller.setSurfaceCapture(surfaceCapture);
+                 }
+             }
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NativeScreenRecorder.java
+@@ -0,0 +1,132 @@
++package com.genymobile.scrcpy.video;
++
++import com.genymobile.scrcpy.AsyncProcessor;
++import com.genymobile.scrcpy.Options;
++import com.genymobile.scrcpy.control.PositionMapper;
++import com.genymobile.scrcpy.display.DisplayInfo;
++import com.genymobile.scrcpy.model.Size;
++import com.genymobile.scrcpy.util.Ln;
++import com.genymobile.scrcpy.device.Streamer;
++import com.genymobile.scrcpy.wrappers.ServiceManager;
++import android.os.Build;
++import android.os.SystemClock;
++import java.io.ByteArrayOutputStream;
++import java.io.InputStream;
++import java.io.IOException;
++import java.nio.ByteBuffer;
++
++/** Uses Android's physical-display recording path on Samsung's extended desktop. */
++public final class NativeScreenRecorder implements AsyncProcessor {
++    private final Streamer streamer;
++    private final VirtualDisplayListener listener;
++    private final Options options;
++    private volatile Process process;
++    private volatile boolean stopped;
++    private Thread thread;
++    private final ByteArrayOutputStream config = new ByteArrayOutputStream();
++    private final ByteArrayOutputStream frame = new ByteArrayOutputStream();
++    private boolean keyFrame;
++    private boolean hasSlice;
++    private long framePts;
++
++    public NativeScreenRecorder(Streamer streamer, VirtualDisplayListener listener, Options options) {
++        this.streamer = streamer;
++        this.listener = listener;
++        this.options = options;
++    }
++
++    public static boolean isSupported(Options options) {
++        return Build.VERSION.SDK_INT >= 36 && Build.BRAND.equalsIgnoreCase("samsung")
++                && options.getVideoSource() == VideoSource.DISPLAY && options.getNewDisplay() == null
++                && options.getDisplayId() > 0 && options.getCrop() == null
++                && options.getCaptureOrientation().getRotation() == 0 && options.getAngle() == 0
++                && options.getVideoCodec() == VideoCodec.H264;
++    }
++
++    private void flushFrame() throws IOException {
++        if (hasSlice) {
++            streamer.writePacket(ByteBuffer.wrap(frame.toByteArray()), framePts, false, keyFrame);
++        }
++        frame.reset(); hasSlice = false; keyFrame = false;
++    }
++
++    private void nal(byte[] bytes) throws IOException {
++        if (bytes.length < 5) { return; }
++        int type = bytes[4] & 31;
++        if (type == 7 || type == 8) {
++            flushFrame();
++            if (type == 7) { config.reset(); }
++            config.write(bytes);
++            if (type == 8) { streamer.writePacket(ByteBuffer.wrap(config.toByteArray()), 0, true, false); }
++            return;
++        }
++        if (type == 9) { flushFrame(); return; }
++        if (type == 1 || type == 5) {
++            // first_mb_in_slice is the first Exp-Golomb value; 1 as its first bit means zero.
++            boolean firstSlice = bytes.length > 5 && (bytes[5] & 0x80) != 0;
++            if (firstSlice && hasSlice) { flushFrame(); }
++            if (!hasSlice) { framePts = SystemClock.elapsedRealtimeNanos() / 1000; }
++            hasSlice = true; keyFrame |= type == 5;
++        }
++        if (frame.size() + bytes.length > 16 * 1024 * 1024) { throw new IOException("Oversized video frame"); }
++        frame.write(bytes);
++    }
++
++    private void stream() throws Exception {
++        DisplayInfo info = ServiceManager.getDisplayManager().getDisplayInfo(options.getDisplayId());
++        if (info == null || info.getUniqueId() == null || !info.getUniqueId().startsWith("local:")) {
++            throw new IOException("External physical display is no longer available");
++        }
++        String physicalId = info.getUniqueId().substring("local:".length());
++        Long.parseLong(physicalId);
++        Size size = info.getSize().constrain(new VideoConstraints(options.getMaxSize(), 2, null));
++        if (listener != null) {
++            listener.onNewVirtualDisplay(options.getDisplayId(), PositionMapper.create(size, null, info.getSize()));
++        }
++        streamer.writeVideoHeader();
++        streamer.writeSessionMeta(size.getWidth(), size.getHeight(), false);
++        process = new ProcessBuilder("/system/bin/screenrecord", "--display-id", physicalId,
++                "--size", size.getWidth() + "x" + size.getHeight(), "--bit-rate", Integer.toString(options.getVideoBitRate()),
++                "--time-limit", "0", "--output-format=h264", "-").start();
++        if (stopped) { process.destroy(); return; }
++        Thread errors = new Thread(() -> {
++            try (InputStream err = process.getErrorStream()) {
++                byte[] b = new byte[2048]; int n;
++                while ((n = err.read(b)) != -1) { Ln.w("screenrecord: " + new String(b, 0, n)); }
++            } catch (IOException ignored) { }
++        }, "screenrecord-stderr");
++        errors.setDaemon(true); errors.start();
++        Ln.i("Samsung external display: using native physical-display capture (" + size + ")");
++        try (InputStream input = process.getInputStream()) {
++            ByteArrayOutputStream pending = new ByteArrayOutputStream();
++            byte[] chunk = new byte[8192]; int zeros = 0; boolean started = false; int count;
++            while (!stopped && (count = input.read(chunk)) != -1) {
++                for (int i = 0; i < count; ++i) {
++                    int value = chunk[i] & 255;
++                    if (value == 0) { ++zeros; continue; }
++                    if (value == 1 && zeros >= 2) {
++                        if (started) { nal(pending.toByteArray()); }
++                        pending.reset(); pending.write(new byte[] {0, 0, 0, 1}); started = true;
++                    } else if (started) {
++                        for (int j = 0; j < zeros; ++j) { pending.write(0); }
++                        pending.write(value);
++                    }
++                    zeros = 0;
++                    if (pending.size() > 16 * 1024 * 1024) { throw new IOException("Oversized H264 NAL unit"); }
++                }
++            }
++            if (!stopped && started) { nal(pending.toByteArray()); flushFrame(); }
++            if (!stopped) { throw new IOException("Native external display capture ended"); }
++        } finally { process.destroy(); }
++    }
++
++    @Override public void start(TerminationListener termination) {
++        thread = new Thread(() -> {
++            try { stream(); } catch (Exception e) { if (!stopped) { Ln.e("External capture failed", e); } }
++            finally { if (process != null) { process.destroy(); } termination.onTerminated(!stopped); }
++        }, "native-external-video");
++        thread.start();
++    }
++    @Override public void stop() { stopped = true; if (process != null) { process.destroy(); } }
++    @Override public void join() throws InterruptedException { if (thread != null) { thread.join(); } }
++}

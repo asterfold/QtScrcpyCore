@@ -98,6 +98,21 @@ void KeyMap::loadKeyMap(const QString &json)
 
         keyMapNode.data.mouseMove.startPosRange = QPointF(0, 0);
         keyMapNode.data.mouseMove.smallEyesRange = QPointF(0, 0);
+        keyMapNode.data.mouseMove.dragBounds = QRectF(.05, .05, .9, .9);
+        if (mouseMoveMap.contains("dragBounds")) {
+            const auto bounds = mouseMoveMap.value("dragBounds").toObject();
+            for (const QString &key : {QStringLiteral("left"), QStringLiteral("top"), QStringLiteral("right"), QStringLiteral("bottom")}) {
+                if (!bounds.value(key).isDouble() || !std::isfinite(bounds.value(key).toDouble())) {
+                    errorString = "json error: invalid view dragBounds"; goto parseError;
+                }
+            }
+            const double left = bounds.value("left").toDouble(), top = bounds.value("top").toDouble();
+            const double right = bounds.value("right").toDouble(), bottom = bounds.value("bottom").toDouble();
+            if (left < .05 || top < .05 || right > .95 || bottom > .95 || right <= left || bottom <= top) {
+                errorString = "json error: invalid view dragBounds limits"; goto parseError;
+            }
+            keyMapNode.data.mouseMove.dragBounds = QRectF(QPointF(left, top), QPointF(right, bottom));
+        }
         if (mouseMoveMap.contains("startPosRange")) {
             if (!checkItemPos(mouseMoveMap, "startPosRange")) {
                 errorString = "json error: invalid startPosRange";
@@ -112,6 +127,13 @@ void KeyMap::loadKeyMap(const QString &json)
                 goto parseError;
             }
             keyMapNode.data.mouseMove.startPosRange = range;
+        }
+        {
+            const auto &mapping = keyMapNode.data.mouseMove;
+            if (!mapping.dragBounds.contains(mapping.startPos - mapping.startPosRange)
+                || !mapping.dragBounds.contains(mapping.startPos + mapping.startPosRange)) {
+                errorString = "json error: view origin outside dragBounds"; goto parseError;
+            }
         }
 
         // small eyes
@@ -475,6 +497,7 @@ QPointF KeyMap::getItemPos(const QJsonObject &node, const QString &name)
 QPair<KeyMap::ActionType, int> KeyMap::getItemKey(const QJsonObject &node, const QString &name)
 {
     QString value = getItemString(node, name);
+    if (value == "WheelDown") { return { AT_KEY, WheelDownKey }; }
     int key = m_metaEnumKey.keyToValue(value.toStdString().c_str());
     int btn = m_metaEnumMouseButtons.keyToValue(value.toStdString().c_str());
     if (key == -1 && btn == -1) {

@@ -3,6 +3,7 @@
 #include <QTimer>
 
 #include "controller.h"
+#include "mousediagnostics.h"
 #include "controlmsg.h"
 #include "inputconvertgame.h"
 #include "receiver.h"
@@ -334,7 +335,11 @@ bool Controller::sendControl(const QByteArray &buffer)
     if (m_sendData) {
         len = static_cast<qint32>(m_sendData(buffer));
     }
-    return len == buffer.length() ? true : false;
+    if (len != buffer.length()) {
+        mouseDiagnostic(QString("control_write_failed bytes=%1 accepted=%2").arg(buffer.length()).arg(len));
+        return false;
+    }
+    return true;
 }
 
 void Controller::postKeyCodeClick(AndroidKeycode keycode)

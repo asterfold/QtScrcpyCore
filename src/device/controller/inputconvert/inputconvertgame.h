@@ -6,6 +6,7 @@
 
 #include "inputconvertnormal.h"
 #include "keymap.h"
+#include "cursormotion.h"
 
 #define MULTI_TOUCH_MAX_NUM 10
 class InputConvertGame : public InputConvertNormal
@@ -85,9 +86,19 @@ private:
     QSize m_showSize;
     bool m_gameMap = false;
     bool m_needBackMouseMove = false;
+    bool m_cursorHidden = false;
+    quint64 m_diagnosticMoves = 0;
+    quint64 m_diagnosticTouches = 0;
+    quint64 m_diagnosticWarps = 0;
+    quint64 m_diagnosticQueued = 0;
+    double m_diagnosticMaxDelta = 0;
+    CursorMotion m_cursorMotion;
     int m_multiTouchID[MULTI_TOUCH_MAX_NUM] = { 0 };
     KeyMap m_keyMap;
     QHash<int, QPointF> m_rangedClicks;
+    int m_wheelDownDelta = 0;
+    quint64 m_wheelGeneration = 0;
+    QHash<int, QPoint> m_lastTouchPositions;
 
     bool m_processMouseMove = true;
 
@@ -118,11 +129,9 @@ private:
     struct
     {
         QPointF lastConverPos;
-        QPointF lastPos = { 0.0, 0.0 };
         bool touching = false;
         int timer = 0;
         bool smallEyes = false;
-        int ignoreCount = 0;
     } m_ctrlMouseMove;
 
     // for drag delay

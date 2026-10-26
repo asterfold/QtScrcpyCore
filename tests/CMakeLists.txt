@@ -31,4 +31,6 @@ set(TOUCH_PROFILE_EXPECTED_NODES 20 CACHE STRING "Expected node count for the re
 if(TOUCH_PROFILE)
     add_test(NAME touch_profile_tests COMMAND touch_mapping_tests "${TOUCH_PROFILE}" "${TOUCH_PROFILE_EXPECTED_NODES}")
     set_tests_properties(touch_profile_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME relative_input_tests COMMAND touch_mapping_tests --relative "${TOUCH_PROFILE}")
+    set_tests_properties(relative_input_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
